@@ -1,0 +1,414 @@
+---
+title: 'US Traffic Accidents: Statistical Methods for Discrete Response, Time Series, and Panel Data in R'
+author: Prathyusha Charagondla, Chris Weyandt and Andrew Kiruluta 
+geometry: margin=1in
+output:
+  pdf_document:
+    latex_engine: xelatex
+  number_sections: yes
+  html_document: default
+  toc: yes
+fontsize: 11pt
+---
+```{r include = FALSE}
+library(knitr)
+opts_chunk$set(tidy.opts=list(width.cutoff=90),tidy=TRUE, warning=TRUE, options(digits = 4))
+library(Hmisc)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(maps)
+library(mapproj)
+library(viridis)
+library(GGally)
+library(plyr)
+library(lmtest)
+library(plm)
+```
+
+# U.S. traffic fatalities: 1980-2004
+
+# 1. Exploratory Data Analysis:
+
+This data is structured as a long panel set, where each of the 48 continental states are numbered alphabetically from 1 to 51, with 2, 9, and 12 missing (Alaska, Hawaii, District of Columbia).  Each state has associated with it 25 observations ranging from 1980 to 2004.  The year is indicated both as its own variable and represented as one of 25 dummy variables. Within each Year-by-State observation there are observations that describe the state's traffic laws, traffic Fatalities, and population demographics.
+
+Variables that are coded as dummy (1 or 0) will often show a number between these two dichotomous options.  This indicates that the state's law was changed during this year and the fraction indicates the portion of the year for which the variable was active.  For example, a value of 0.75 indicates that for three quarters of the year, the variable was $True$ and for the other quarter, the variable was $False$.
+
+```{r}
+driving <- load('driving.RData')
+data.desc <- describe(data)
+r.vars <- c('totfatrte')
+e.vars <- c('bac08', 'bac10', 'perse', 'sbprim', 'sbsecon', 'sl70plus', 'gdl', 'perc14_24',
+'unem', 'vehicmilespc') 
+p.vars <- c('year', e.vars)
+d.vars <- grep('d\\d\\d', names(data), value=TRUE)
+m.vars <- c('year', 'state')
+t.vars <- c('sl70', 'sl75', 'slnone')
+u.vars <- (names(data) %>% setdiff(r.vars) %>% setdiff(e.vars) %>% setdiff(d.vars)%>% setdiff(m.vars) %>%setdiff(t.vars)) 
+a.vars <- names(data) %>% setdiff(u.vars)
+```
+Each attribute should have 1200 values (48 states, 25 years). We can see that we 
+have no missing values. The only immediate concern here is that some boolean legislature indicators (bac08, bac10, each of the sl variables) have more than 2 values. This is due to the fact that some of the laws were implemented mid-year - thus, the fraction indicates which month of the year the transition ocurred.
+
+```{r}
+summaryAttributes <- do.call(bind_rows, c(list(.id='variable'), lapply(data.desc, function(col)   sapply(col$counts, as.numeric)))) %>%
+inner_join(desc %>% mutate_if(is.factor, as.character), y=.) %>% select(-matches('\\.\\d\\d')) %>%
+filter(variable %in% setdiff(a.vars, d.vars))
+summaryAttributes[c('variable','label','missing','distinct','Info','Mean','Gmd')]
+```
+# Traffic Laws 
+
+- Speed Limit
+There are six dummy variables starting with sl, which indicate the speed limit mandated by the state for the year. The first four variables code speed limits in 5 mph increments from 55 to 75 mph. The fifth variable slnone indicates there was no speed limit for the state that year. The sixth variable sl70plus indicates that either the speed limit was 70 mph or greater, or that there was no speed limit that year.
+
+- Seatbelts
+The next variable seatbelt is categorical and describes the type of seat belt law that exists, “0” if no law, ‘1’ if primary (no other violation required to give a ticket), “2” if secondary (another violation must have occurred for the officer to issue a seatbelt ticket). There also exist two dummy variables starting with sb, one
+for primary and the other for secondary.
+
+- Drinking
+The variables minage, zerotol, and bac describe the state’s approach to drinking laws. The minage variable is the state’s legal drinking age for the year, taking on 12 distinct values from ranging from 18 to 21, with 21 making up the great majority of observations. Non-integer observations indicate a year of
+The zerotol variable indicates if the state enacted a Zero Tolerance law for drinking, which makes it a criminal DUI offense for drivers under the age of 21 to drive with even a small amount of alcohol in their system. This variable takes on 11 distinct values, ranging from 0 to 1, with zero and 1 making up the vast majority of observations
+The next two bac dummy variables indicate if the state’s acceptable BAC is 0.08% or 0.10%.
+Several states have adopted perse laws which allows for suspension or revocation of driver’s license for DUI or DWI cases. The perse dummy variable indicates to the proportion of the year the state had this type of law enacted.
+
+- Fatality Statistics
+Fatality statistics are given for each State-by-Year observation and include gross totals as well as totals normalized by vehicle miles driven by the state and per capita. These statistics are reported in terms of the time of occurrence, which include Fatalities over all times, Fatalities at nighttime, and Fatalities during the weekend.
+
+- Demographics
+Observations also report a number of demographics specific to each state for each year reported. These include the number of vehicle miles in billions by the state’s population for the year (total and per capita), the state’s percent unemployment, and the percentage of the state’s population between 14 and 24, inclusive.
+
+As a validity check, we want to ensure that each year flag (identified and kept in d.vars) has the same number of observations (48 states). We can see that three states are missing - presumably the non-continental states (AK, DC, HI).
+
+```{r}
+(data.desc[d.vars]) %>% sapply(function(v) v$counts) %>% t %>% data.frame %>% mutate_if(is.factor, as.character) %>% sapply(unique)
+```
+```{r}
+setdiff(1:51, unique(data$state))
+```
+Next, we visualize trends in total fatality rate by state. We use a composite figure to allow observation of individual state trends without clutter. We can see that most states have a downwards trend in total fatality rate year-over-year.
+```{r}
+#cast(data[, c(m.vars, r.vars)], year~state)
+ymax <- max(data$totfatrte)
+for (state.batch in (unique(data$state) %>% split(., ceiling(seq_along(.) / 6)))) {
+print(ggplot(subset(data, state %in% state.batch), aes(year, totfatrte)) + geom_line(aes(colour=factor(state)))
++ ylim(0, ymax)) + theme(legend.position = 'bottom') }
+```
+There are relatively few indicator values that are neither 0 nor 1, but these few could be problematic. If we treat the indicator as a factor, these values will introduce a number of distinct levels with small samples. If we treat this indicator as linear, there is an implication of linearity between the fractional year and the effect on total fatality rate. To reduce this effect, we will bucket all transition values (neither zero nor one) into a single representative value and then treat these variables as factors. Thus, 0 will indicate a complete lack of the indicator, 2 will indicate that the indicator was present throughout the entire year, and 1 will indicate a transition year where the indicator was true for part of the year. The functions defined below allow for conversions to this specified ternary factor as well as simple logical factors and a monthly factor.
+```{r}
+as.month.factor <- function(y) factor(round(12 * y), 0:12) 
+as.logical.factor <- function(b) factor(as.logical(b), c(TRUE, FALSE)) 
+as.ternary.factor <- function(v) factor((v > 0) + (v == 1), c(0, 1, 2))
+```
+### Univariate EDA
+
+#### Dependent Variables - Fatalities
+
+```{r}
+traffic = data
+h = geom_histogram(aes(y=..count..), 
+                 bins = 30, fill = "#99123F", 
+                 colour = "black")
+t = theme(plot.title = element_text(lineheight = 1, face = "bold"),
+          axis.text.y = element_blank(),
+          axis.title.y = element_blank()) 
+
+plot.hist1  = ggplot(traffic, aes(x = totfat)) + scale_x_continuous(name ="Total") + h + t 
+plot.hist2  = ggplot(traffic, aes(x = nghtfat)) + scale_x_continuous(name ="Night") + h + t
+plot.hist3  = ggplot(traffic, aes(x = wkndfat)) + scale_x_continuous(name ="Weekend") + h + t + t
+plot.hist4  = ggplot(traffic, aes(x = totfatpvm)) + scale_x_continuous(name ="Total/Mile Driven") + h + t 
+plot.hist5  = ggplot(traffic, aes(x = nghtfatpvm)) + scale_x_continuous(name ="Night/Mile Driven") + h + t + t
+plot.hist6  = ggplot(traffic, aes(x = wkndfatpvm)) + scale_x_continuous(name ="Weekend/Mile Driven") + h + t + t
+plot.hist7  = ggplot(traffic, aes(x = totfatrte)) + scale_x_continuous(name ="Total/Capita") + h + t + t
+plot.hist8  = ggplot(traffic, aes(x = nghtfatrte)) + scale_x_continuous(name ="Night/Capita") + h + t + t
+plot.hist9  = ggplot(traffic, aes(x = wkndfatrte)) + scale_x_continuous(name ="Weekend/Capita") + h + t 
+grid.arrange(plot.hist1, plot.hist2, plot.hist3, plot.hist4, plot.hist5, plot.hist6, plot.hist7, 
+             plot.hist8, plot.hist9, nrow = 3, ncol = 3, top = quote("Traffic Fatalities - Pooled Observations")) 
+
+shapiro.test(traffic$totfat)
+shapiro.test(traffic$totfatpvm)
+shapiro.test(traffic$totfatrte)
+
+shapiro.test(log(traffic$totfat))
+shapiro.test(log(traffic$totfatpvm))
+shapiro.test(log(traffic$totfatrte))
+```
+
+We see that pooling the State-Year observations underscores meaningful information about the underlying trends of the fatality variables.  Skew is most evident for the unnormalized fatality rates (Total, Night, and Weekend) and least evident when the data is normalized by the state's population. We see that virtually every variable is positively skewed, which means a log transformation may improve normality.  When considering normalization techniques (none, per vehicle mile, per capita), it appears that $totfatpvm$ responds most favorably to the log transformation.
+
+
+##Univariate Analysis of DVs by Year
+
+```{r}
+#Shape files for each state
+states = map_data('state', projection = "albers", parameters = c(39, 45))
+
+#Associate State Index with State Name
+statenames = unique(states$region[])
+statenames = c(statenames[1], "alaska", statenames[2:10], 
+               'hawaii', statenames[11:length(statenames)])
+states = states[states$region != "district of columbia",]
+states$state = match(states$region,statenames)
+#Associate the state shapes with associated observations
+traffic.map = merge(states, traffic, by="state")
+
+
+b = geom_boxplot(aes(fill = year, group = year)) 
+t = theme(plot.title = element_text(lineheight = 1, face = "bold"), 
+          legend.position = "none",
+          axis.text.x = element_blank(),
+          axis.title.x = element_blank())
+
+library(viridis)
+c = scale_fill_viridis(option = "plasma", begin = 0.25)
+
+plot.bp1 = ggplot(traffic.map, aes(year, totfat)) + b + t + c
+plot.bp2 = ggplot(traffic.map, aes(year, nghtfat)) + b + t + c
+plot.bp3 = ggplot(traffic.map, aes(year, wkndfat)) + b + t + c
+plot.bp4 = ggplot(traffic.map, aes(year, totfatpvm)) + b + t + c
+plot.bp5 = ggplot(traffic.map, aes(year, nghtfatpvm)) + b + t + c
+plot.bp6 = ggplot(traffic.map, aes(year, wkndfatpvm)) + b + t + c
+plot.bp7 = ggplot(traffic.map, aes(year, totfatrte)) + b + t + c
+plot.bp8 = ggplot(traffic.map, aes(year, nghtfatrte)) + b + t + c
+plot.bp9 = ggplot(traffic.map, aes(year, wkndfatrte)) + b + t + c
+grid.arrange(plot.bp1, plot.bp2, plot.bp3, plot.bp4, plot.bp5, plot.bp6, plot.bp7, 
+             plot.bp8, plot.bp9, nrow = 3, ncol = 3, top = quote("Boxplots of State Fatalities: \n1980 - 2004"))
+```
+**Total:**
+Top outliers look to have decreased over time, but the national average of gross fatalities looks almost unchanged over time.
+**PVM:**
+Significant decline over time in average rate per vehicle mile driven.  Variance looks to be proportional to mean, also decreasing over time. 
+**RTE:**
+Significant decline over time in average fatalities per capita.  Variance does not look to be proportional to mean. 
+
+##Univariate Analysis of DVs by State
+
+```{r}
+b = geom_boxplot(aes(fill = state, group = state)) 
+t = theme(plot.title = element_text(lineheight = 1, face = "bold"), 
+          legend.position = "none", 
+          axis.text.x = element_blank(),
+          axis.title.x = element_blank()) 
+library(viridis)
+c = scale_fill_viridis(option = "plasma", begin = 0.25)
+
+plot.bp1 = ggplot(traffic.map, aes(state, totfat)) + b + t + c
+plot.bp2 = ggplot(traffic.map, aes(state, nghtfat)) + b + t + c
+plot.bp3 = ggplot(traffic.map, aes(state, wkndfat)) + b + t + c
+plot.bp4 = ggplot(traffic.map, aes(state, totfatpvm)) + b + t + c
+plot.bp5 = ggplot(traffic.map, aes(state, nghtfatpvm)) + b + t + c
+plot.bp6 = ggplot(traffic.map, aes(state, wkndfatpvm)) + b + t + c
+plot.bp7 = ggplot(traffic.map, aes(state, totfatrte)) + b + t + c
+plot.bp8 = ggplot(traffic.map, aes(state, nghtfatrte)) + b + t + c
+plot.bp9 = ggplot(traffic.map, aes(state, wkndfatrte)) + b + t + c
+grid.arrange(plot.bp1, plot.bp2, plot.bp3, plot.bp4, plot.bp5, plot.bp6, plot.bp7, 
+             plot.bp8, plot.bp9, nrow = 3, ncol = 3, top = "Boxplots of Annual Fatalities by State") 
+```
+There is good agreement between state and rates when considering timing of the incident (overall, at night, and during the weekend).
+
+**Total Fatalities: **
+Variance is proportional to the mean of the state, which implies using these variables could result in significant heteroskedasticity. There are also a few outliers that would significantly affect the results (likely California and Texas).
+**Per Vehicle Mile:**
+Observations look constant with similar variance and no major outliers that could influence linear modeling.  
+**Per Capita:**
+No states that seem to be outliers, variance is not constant between states, nor a function of average.
+
+##Univariate Choropleths of DVs
+```{r}
+states = map_data('state', projection = "albers", parameters = c(39, 45))
+statenames = unique(states$region[])
+statenames = c(statenames[1], "alaska", statenames[2:10],
+               'hawaii', statenames[11:length(statenames)])
+states = states[states$region != "district of columbia",]
+states$state = match(states$region,statenames)
+traffic.map = merge(states, traffic, by="state")
+
+no_var = !names(traffic.map) %in% c('year', "region", "subregion", "lat", "long", "order", "group")
+traffic.state.agg = aggregate(traffic.map[, no_var], list(traffic.map$state), mean)
+traffic.map.agg = merge(states, traffic.state.agg, by="state")
+
+t = theme(plot.title = element_text(lineheight = 1, face = "bold"), 
+          axis.text.y = element_blank(),
+          axis.title.y = element_blank())
+
+plot.map1 = qplot(long, lat, data=traffic.map.agg, geom="polygon", fill=totfat, group=group) + labs(x = "Total") + t
+plot.map2 = qplot(long, lat, data=traffic.map.agg, geom="polygon", fill=nghtfat, group=group) + labs(x = "Night") + t
+plot.map3 = qplot(long, lat, data=traffic.map.agg, geom="polygon", fill=wkndfat, group=group) + labs(x = "Weekend") + t
+plot.map4 = qplot(long, lat, data=traffic.map.agg, geom="polygon", fill=totfatpvm, group=group) + labs(x = "Total/Mile Driven") + t
+plot.map5 = qplot(long, lat, data=traffic.map.agg, geom="polygon", fill=nghtfatpvm, group=group) + labs(x = "Night/Mile Driven") + t
+plot.map6 = qplot(long, lat, data=traffic.map.agg, geom="polygon", fill=wkndfatpvm, group=group) + labs(x = "Weekend/Mile Driven") + t
+plot.map7 = qplot(long, lat, data=traffic.map.agg, geom="polygon", fill=totfatrte, group=group) + labs(x = "Total/Capita") + t
+plot.map8 = qplot(long, lat, data=traffic.map.agg, geom="polygon", fill=nghtfatrte, group=group) + labs(x = "Night/Capita") + t
+plot.map9 = qplot(long, lat, data=traffic.map.agg, geom="polygon", fill=wkndfatrte, group=group) + labs(x = "Weekend/Capita") + t
+grid.arrange(plot.map1, plot.map2, plot.map3, plot.map4, plot.map5, plot.map6, plot.map7, 
+             plot.map8, plot.map9, nrow = 3, ncol = 3, top = quote("Average Traffic Fatalities: 1980-2004\n"))
+```
+**TOTAL:**
+California, Texas, and Florida have the highest overall total fatalities averaged over all years observed.  It's apparent that these observations are outliers and will skew our modeling.
+**PVM:**
+Evidence of regional influence. Significantly higher rates just inland from West Coast and in Lousisiana/Mississippi.
+Perhaps State GDP per Capita might be an unexplained factor?
+**RTE:**
+Wyoming and Montana show higher per capita rates.  There is some regional influence but probably less spatial correlation as compared to pvm.
+
+**Overall Univariate Conclusions:**
+The $totfatrte$ variable is not a bad choice to use as our dependent variable.  Of the variables available, it looks most normally distributed when pooled, doesn't have many influential outliers, nor does there seem to be regional correlation, which could contribute to omitted variable bias.  There also doesn't look to be much serial correlation or heteroskedasticity over time, which means we may be able to get reasonable results from a pooled OLS.
+
+### Bivariate EDA
+####Average of State Observations Over Time
+```{r}
+mean_by_year = aggregate(traffic[,c("totfatrte","statepop", "vehicmiles", "vehicmilespc","unem", "perc14_24")], traffic['year'], FUN=mean)
+ggpairs(mean_by_year) + ggtitle(label = "Average Across State vs. Year")
+```
+We see significant time dependence between each variable and time when we average all state observations. The fatality rate goes down, population increases and gross vehicle miles driven increase.  Unemployment is cyclical, but shows a steady decline overall.  
+
+Miles driven per capita increases, which is not necessarily expected. This could be attributed to the fact that cars have become more affordable over time and are therefore more accessible.  Percent 14_24 decreases, which indicate an aging population and might mean there are more experienced drivers and therefore fewer accidents.  For this reason, this might be a good variable to include in the final model.  Beyond this, when comparing scatters of any two variables, we cannot consider their covariance as significant due to spurious correlation.  
+
+####Year-Aggregates By State
+```{r}
+mean_by_state = aggregate(traffic[,c("totfatrte","statepop", "vehicmiles", "vehicmilespc","unem", "perc14_24")], traffic['state'], FUN=mean)
+ggpairs(mean_by_state, size = 12) + ggtitle(label = "Average of Demographic 1980-2004 vs. State")
+```
+When considering average of demographic variables from 1980-2004 vs. State, we see the most significant correlation between vehicle miles driven and population.  This is not surprising, since more people to drive means more miles driven.  A significant observation is the correlation between vehicle miles per capita and fatality rate.  This makes sense because more time on the road means greater chance of accident. Negative correlation between state population and totfatrte.  This is unexpected, but might be explained by more people in a state, which means more tax revenue, more investment in safe driving infrastructure.  We see that vehicle miles pc go down with state population as well, meaning that more populous states tend to travel on the road less, thereby putting themselves at lower risk of fatality. We see a medium correlation with youth and totfatrte.  Certainly, the higher the proportion of youth, the more likely we are to have youth accidents, but there is also a medium effect for youth and miles pc.  Younger states drive more, which could explain higher rate of accidents, not necessarily that younger drivers are worse at driving	(although they probably are).
+
+# Fatality Rate and Traffic Laws: State-Aggregates Over Time:
+```{r}
+mean_by_year = aggregate(traffic[,c("totfatrte",'bac08','bac10','sbprim','sbsecon','perse','sl70plus','gdl', "zerotol", "minage")], traffic['year'], FUN=mean)
+ggpairs(mean_by_year, size = 3) + ggtitle(label = "Proportion of States with Law vs. Year (1980-2004)")
+```
+These data points indicate trends for the entire country and give us a sense of the adoption of each law over time.  We see a strong time dependence between each of the law variables and time.  Although the correlation between time and $bac10$ is low, it's evident that a quadratic term would do an excellent job of predicting the number of states with the law at any given year.  When comparing scatters of any two variables, we cannot consider their covariance as significant due to spurious correlation.  However, there There seems to be strong covariance between the $gdl$ and $sbprim$ covariates.  That is to say, for a given year, if we see a relatively high number of states with $gdl$ laws, we would also expect there to be a relatively high number of states with $sbprim$ laws for that year. 
+
+#### Fatality Rate and Traffic Laws: Year-Aggregates By State
+#```{r  out.height="400px", out.width="400px",fig.height=10,fig.width=10}
+```{r}
+mean_by_state = aggregate(traffic[,c("totfatrte",'bac08','bac10','sbprim','sbsecon','perse','sl70plus','gdl', 'zerotol', "minage")], traffic['state'], FUN=mean)
+ggpairs(mean_by_state, size = 3) + ggtitle(label = "Proportion of Time State Had Law From 1980-2004 vs. State")
+```
+There is strong correlation between $bac08$ and $bac10$ variables and $sbprim$ and $sbsecon$ variables.  This makes sense, because these sets of laws are mutually exclusive; a state can only have one law or the other.   Therefore, we would expect to see that the more years a state has one variable, the less years we would expect to see of its converse law.  There are a few cases of  significant interaction between covariates.  For example, the correlation between $bac08$ and $zerotol$ is 0.445.  This means that the longer a state has had a $bac08$ law passed, the longer we would expect that state to have had a $zerotol$ law passed as well.
+
+
+##  Average Overall Fatality Rate:
+We start by plotting the average fatality rate(over all 48 states) by year. We can see that over time we have observed a decline in the total fatalities per 100,000 population. Without controlling for any factors, driving has become safer over time.
+```{r}
+library(plyr)
+yearly_fatality <- ddply(data, .(year), summarise, totfatrate=mean(totfatrte))
+ggplot(data = yearly_fatality, mapping=aes(x=year,y=totfatrate)) + geom_point() + geom_smooth()
+```
+We now create an initial model of fatality rate on yearly indicator variables only.
+```{r}
+(simple.formula <- d.vars %>% c(list(sep='+')) %>% do.call(paste, .) %>% paste0(r.vars, '~', .) %>% as.formula)
+```
+
+```{r}
+(simple.lm <- lm(simple.formula, data=data)) %>% summary
+```
+This model explains what the effect of each year on total fatality rate is expected to be. The coefficients associated with each of these yearly indicators is declining as the year dummy increases - which is expected, since our plot of average fatality rate over the years shows a declining trend. We do note that the coefficients of earlier years all achieve statistical significance (up to 1990), while all yearly coefficients after 1990 are non-significant. This is due to the fact that the standard error for each of the estimates remains the same while the estimates decline in magnitude. The regression explains how the fatality rate has changed (average across the 48 states) as compared to the year 1980. For example, d04 has a coefficient of -8.766. This implies that the average of totfatrte was 8.8 less than 25.5 (average of totfatrte in 1980) or 16.8, precisely what is reported in the graph above.
+
+The fitted regression equation is $\text{avg fatality} = 25.49 + (−1.824) · d81 + (−4.552) · d82 + · · · + (−8.766)$ · d04 All the estimated coefficients are statistically significant at 5%, except for the one for 1981, which suggests that there was a lot of variability in fatality rates across the 48 states in 1981. The intercept of the regression model is the average fatality rate for 1980. All other coefficients measure how the average fatality compares for the year (represented by the dummy variable) versus 1980. Each coefficient is negative, which means that the average fatality rate each year decreased relative to 1980. The coefficients are also mostly increasingly negative, represting the negative trend that we see in the graph above. Based on this, we would say that driving (as measured by fatality rate per 100K population) has gotten safer over the years 1980-2004 on average in the United States. Note, we have not accounted for any other factors in this assessment. The target variable totfatrte is a simple average of the fatality rates of each state, which is not weighted by the population of each state, nor for the cumulative miles driven.
+
+
+# Expanded  adding variables *bac08, bac10, perse, sbprim, sbsecon, sl70plus, gdl, perc14_24, unem, vehicmilespc*: 
+```{r}
+traffic$bac08bin = ifelse(traffic$bac08<0.5,0,1)
+traffic$bac10bin = ifelse(traffic$bac10<=0.5,0,1)
+traffic$persebin = ifelse(traffic$perse<0.5,0,1)
+traffic$sbprimbin = ifelse(traffic$sbprim<0.5,0,1)
+traffic$sbseconbin = ifelse(traffic$sbsecon<0.5,0,1)
+traffic$sl70plusbin = ifelse(traffic$sl70plus<0.5,0,1)
+traffic$gdlbin = ifelse(traffic$gdl<0.5,0,1)
+
+traffic$bac0810bin = traffic$bac08bin + traffic$bac10bin
+describe(traffic$bac0810bin)
+
+lm.mod2 = lm(totfatrte~bac08bin+bac10bin+persebin+sbprimbin+sbseconbin+sl70plusbin+gdlbin+
+                      perc14_24+unem+vehicmilespc+
+                      d81+d82+d83+d84+d85+d86+d87+d88+d89+
+                      d90+d91+d92+d93+d94+d95+d96+d97+d98+d99+
+                      d00+d01+d02+d03+d04, data=traffic)
+summary(lm.mod2)
+plot(lm.mod2)
+```
+## Rationale
+In most instances we can expect there to be a lag between when certain types of laws are enacted and when they impact change in behavior.  Given that, we suggest transforming the variables that are essentially binary in nature (whether a law was in effect or not) to be strictly binary (so if it was in effect for less than 1/2 the year, we will code as 0 and 1 otherwise).  
+
+As for the other variables - $perc14_24, unem, vehicmilespc$, they are all already expressed as normalized metrics (where the denominator is some measure of the population, either as per 100 people or per person).  
+
+## Variable Definition
+The BAC (blood alcohol content) is a measure used to determine if someone is driving under the influence of alcohol.  For $bac10$ the threshold is 0.10 and $bac8$ represents a threshold of 0.08.  
+
+
+## Coefficient Interpretation
+The coefficient on bac08 is -2.13 and the coefficient for bac10 is -1.12; The mathematical interpretation of the coefficients in the regression would suggest that all else being equal, a state that has a threshold of 0.08 would have a lower $totfatrte$ than a state that has a threshold of 0.1 because the coeff for bac08 is -2.13 and the coeff for bac10 is -1.12.  This model structure  also suggests that the effect of having neither of the thresholds implies an increase of the fatality rate by 3.25.
+
+## Per Se Laws
+According to the linear regression model - YES, perse laws have a negative effect on $totfatrte$. All else being equal, the existence of perse laws lowers $totfatrte$ by -0.57 compared to when these laws do not exist.  
+
+## Primary Seat Belt
+Per the model specification, inclusion of the primary seatbelt variable $sbprimbin$ implies a reduction in Fatalities by 0.0425. However, because the coefficient is not significantly different from zero, we interpret it as having no effect on $totfatrte$.  This does not imply that seatbelts do not affect fatality rates, just that compulsory laws may not change drivers' willingness to comply with the law.  
+
+# Fixeed Effect Model
+```{r}
+(effects.formula <- p.vars[-c(1)] %>% c(list(sep='+')) %>% do.call(paste, .) %>% paste0(r.vars, '~', .) %>% as.formula)
+```
+
+```{r}
+(fe.plm <- plm(effects.formula, index=c('state', 'year'), model='within', data=data %>% mutate(sbprim=as.logical.factor(sbprim),
+sbsecon=as.logical.factor(sbsecon), bac08=as.ternary.factor(bac08), bac10=as.ternary.factor(bac10), perse=as.ternary.factor(perse), gdl=as.ternary.factor(gdl), sl70plus=as.ternary.factor(sl70plus) ))) %>% summary
+```
+
+The coefficients for bac08, bac10, perse and sbprim are all statistically significant with the panel fixed-effects model.  The estimate for the bac08 coeff is slightly lower, the coeff for bac10 is about the same as before. The perse coeff has changed significanty from -6.1 to -1.1;  We also fnid that the coeff for sbprim is now statistically significant.  
+Both models explain about the same amount of variation in the $totfatrte$ variable (comparable adjusted-R-sq values);  however the fixed-effects model is more reliable because it models the variation over time in $totfatrte$ and all the independent variables  *within* each state 
+The fixed effect assumption is that the individual-specific effects are correlated with the independent variables. The pooled effects assumption (made in a random effects model) is that the individual-specific effects are uncorrelated with the independent variables. This is a very strong assumption and a difficult one to meet.  We are assuming there is no omitted variable bias and no correlation between same-state observations.  
+
+# Random Effects model versus Fixed Effects model:
+```{r}
+(re.plm <- plm(effects.formula, index=c('state', 'year'), model='random', data=data %>% mutate(sbprim=as.logical.factor(sbprim),
+ sbsecon=as.logical.factor(sbsecon), bac08=as.ternary.factor(bac08), bac10=as.ternary.factor(bac10), perse=as.ternary.factor(perse), gdl=as.ternary.factor(gdl), sl70plus=as.ternary.factor(sl70plus) ))) %>% summary                                                                                       
+```
+Random effects model would pool everything together and would rely on the assumption that same-state observations are independent.  While we have quite a few variables we could add to the mix, this isn't a realistic assumption to make.  We need to account for cultural/economic differences between states.  We are able to remove this omitted variable bias using fixed effects modeling with dummy variables of each year to explain the unaccounted for time-variant error dependence.
+
+
+# FE Estimated effect on *totfatrte* with increased traffic:
+```{r}
+ fe.plm$coefficients[['vehicmilespc']] * 1000
+```
+```{r}
+re.plm$coefficients[['vehicmilespc']] * 1000
+```
+Incrementing the per capita vehicle miles traveled by 1,000 leads to an increase in total fatality rate per 100,000 people by .295 according to our fixed effects model and .543 according to our random effects model - both of which are controlling for year and state.
+
+
+#Serial correlation or heteroskedasticity in the idiosyncratic errors of the model: 
+We will use the Breusch-Godfrey/Wooldridge test for serial correlation:
+```{r}
+plm::pbgtest(fe.plm)
+```
+```{r}
+plm::pbgtest(re.plm)
+```
+Observing the above outputs, we can see that both our random effects and fixed effects model reject the null hypothesis that there is no serial correlation between our residuals.
+Next, we will test the null hypothesis of homoskedastic residuals using the Breusch-Pagan test:
+```{r}
+library("lmtest")
+lmtest::bptest(fe.plm)
+```
+
+
+```{r}
+lmtest::bptest(re.plm)
+```
+Observing the above outputs, both of our models reject the null hypothesis of homoskedastic residuals. To control heteroskedastic residuals and serial correlation, we can use Robust Covariance Matrix Estimation (Sandwich Estimator) with the “arellano” method, which clusters by group and is best with models showing heteroskedasticity/serial correlation:
+```{r}
+coeftest(fe.plm, vcovHC(fe.plm, method = "arellano"))
+```
+```{r}
+coeftest(re.plm, vcovHC(re.plm, method = "arellano"))
+```
+Because the panel data is comparing time series, we can expect to see serial correlation and heteroskedasticity, so using the robust errors is necessary. The consequences of not using heteroskedasticity robust standard errors is that we would underestimate our standard errors, thus falsely inflating the significance of each of our reported coefficients. We observe less significance when using robust standard errors above - though our key findings remain.
+
+
+
+
+
+
+
+
